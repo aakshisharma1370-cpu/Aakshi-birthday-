@@ -148,6 +148,11 @@ textarea { min-height: 96px; resize: vertical; }
 .note .who { font-family: var(--font-ui); font-size: .82rem; color: var(--accent); display: flex; justify-content: space-between; gap: 10px; }
 .note button { border: 0; background: none; color: var(--muted); cursor: pointer; font-size: .78rem; text-decoration: underline; }
 .empty-note { column-span: all; text-align: center; color: var(--muted); font-family: var(--font-hand); font-size: 1.1rem; padding: 40px 10px; }
+.empty-note .btn { margin-top: 12px; font-family: var(--font-body); font-size: 1rem; }
+.note .who { flex-wrap: wrap; }
+.note .who time { color: var(--muted); }
+.status.err { color: var(--fg); font-weight: 700; }
+.btn[aria-busy="true"] { cursor: progress; }
 
 /* quiz */
 .qmeta { display: flex; justify-content: space-between; font-family: var(--font-ui); font-size: .85rem; color: var(--muted); }
@@ -253,7 +258,7 @@ img { max-width: 100%; }
   <div class="right">
   <section id="wall-sec">
     <h2>Message board</h2>
-    <p class="sub">Add a sticky note with your name for my 19th, then send it to me on WhatsApp so I can pin it for everyone.</p>
+    <p class="sub">Add a sticky note with your name for my 19th. It goes up on the board for everyone, and you can send it to me on WhatsApp too.</p>
     <form id="wish-form" autocomplete="off">
       <div>
         <label for="w-name">Your name</label>
@@ -278,7 +283,7 @@ img { max-width: 100%; }
 
   <section id="lead-sec">
     <h2>People will get their name on my will</h2>
-    <p class="sub">Ranked by correct answers, then fastest time. Send me your score and I will add you.</p>
+    <p class="sub">Ranked by correct answers, then whoever finished first. Every finished quiz shows up here.</p>
     <ol class="lead" id="lead"><li class="lead-empty">No scores yet. Finish the quiz to claim the first spot.</li></ol>
   </section>
   </div>
@@ -287,13 +292,16 @@ img { max-width: 100%; }
   <footer>Made with vibes for Aakshi's 19th</footer>
 </main>
 
+<!-- shared message wall + leaderboard: Supabase client (pinned, integrity-checked), then public settings from config.js -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2/dist/umd/supabase.js" integrity="sha384-Rj26LVGvoeRVR6+mwQmFfcR3QOBEwT+ZmuCWpuiqeTzJpCs0ER4ITAWGb4Hiy3Ok" crossorigin="anonymous"></script>
+<script src="config.js"></script>
 <script>
-/* ===== EDIT HERE: notes and scores friends sent to Aakshi ===== */
+/* ===== EDIT HERE (optional): extra notes and scores to always show, on top of the shared database ===== */
 var DATA_NOTES = [
   /* { name: "Friend name", msg: "Happy birthday!" }, */
 ];
 var DATA_SCORES = [
-  /* { name: "Friend name", score: 4, ms: 23400 }, */
+  /* { name: "Friend name", score: 4 }, */
 ];
 /* ===== end of editable part ===== */
 (function () {
@@ -436,11 +444,15 @@ var DATA_SCORES = [
     { q: "Which is Aakshi's favourite gun, the OG in COD?", o: ["Mac-10", "QQ9", "VMP", "FSS Hurricane"], a: 1 },
     { q: "Which song is on loop for Aakshi?", o: ["Vienna", "Jaata ka Chora", "Ishq Sufiyana", "Brutal"], a: 0 }
   ];
-  var qi = 0, score = 0, quiz = $("quiz"), player = "", t0 = 0;
-  var LS_NOTES = "aakshi_notes", LS_SCORES = "aakshi_scores";
+  var qi = 0, score = 0, quiz = $("quiz"), player = "", t0 = 0, attempt = 0, picks = [];
+  var LS_NOTES = "aakshi_notes", LS_MY_NOTES = "aakshi_my_note_ids", LS_MY_SCORES = "aakshi_my_score_ids";
+  var NAME_MAX = 40, MSG_MAX = 280; /* form limits; the database itself allows up to 60 / 1000 */
   function loadLocal(k) { try { var v = JSON.parse(localStorage.getItem(k) || "[]"); return Array.isArray(v) ? v : []; } catch (e) { return []; } }
   function saveLocal(k, arr) { try { localStorage.setItem(k, JSON.stringify(arr.slice(-50))); } catch (e) {} }
-  var localNotes = loadLocal(LS_NOTES), localScores = loadLocal(LS_SCORES);
+  /* notes from the old device-only version of this page, offered for upload below */
+  var localNotes = loadLocal(LS_NOTES);
+  /* ids of rows this device added, so they keep their "(you)" tag */
+  var myNotes = loadLocal(LS_MY_NOTES), myScores = loadLocal(LS_MY_SCORES);
   function mk(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text) e.textContent = text; return e; }
   function hash(s) { var h = 0; for (var i = 0; i < s.length; i++) { h = (h * 31 + s.charCodeAt(i)) | 0; } return Math.abs(h); }
   function waButton(text, label) {
@@ -449,18 +461,151 @@ var DATA_SCORES = [
     a.style.display = "inline-block"; a.style.textDecoration = "none";
     return a;
   }
+  function say(el, text, bad) { el.textContent = text; el.classList.toggle("err", !!bad); el.hidden = false; }
+  function busy(b, on, text) {
+    if (on) { b.dataset.label = b.textContent; b.textContent = text; } else if (b.dataset.label) { b.textContent = b.dataset.label; }
+    b.disabled = on; b.setAttribute("aria-busy", String(on));
+  }
+  /* trimmed value, or "" with the reason in clean.err */
+  function clean(v, max, label) {
+    v = String(v == null ? "" : v).trim();
+    clean.err = !v ? "Please write " + label + " first." : v.length > max ? "Keep " + label + " to " + max + " characters or fewer." : "";
+    return clean.err ? "" : v;
+  }
+  function ts(iso) {
+    var t = Date.parse(iso);
+    if (isNaN(t)) t = Date.parse(String(iso).replace(/(\.\d{3})\d+/, "$1"));
+    return isNaN(t) ? Infinity : t;
+  }
+  function when(iso) {
+    var t = ts(iso); if (t === Infinity) return "";
+    try { return new Date(t).toLocaleString(undefined, { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }); } catch (e) { return new Date(t).toLocaleString(); }
+  }
+
+  /* ---------- shared database (Supabase) ---------- */
+  var db = null, dbProblem = "";
+  function isSecretKey(k) {
+    if (/^sb_secret_/.test(k)) return true;
+    var p = k.split("."); if (p.length !== 3) return false;
+    try { return JSON.parse(atob(p[1].replace(/-/g, "+").replace(/_/g, "/"))).role === "service_role"; } catch (e) { return false; }
+  }
+  (function () {
+    var c = window.SUPABASE_CONFIG || {}, url = String(c.url || "").trim(), key = String(c.publishableKey || c.anonKey || "").trim();
+    if (!window.supabase || typeof window.supabase.createClient !== "function") dbProblem = "the Supabase library did not load";
+    else if (!window.SUPABASE_CONFIG) dbProblem = "config.js did not load";
+    else if (!/^https:\/\/[^\s\/]+$/.test(url.replace(/\/+$/, ""))) dbProblem = "config.js is missing the Supabase project URL";
+    else if (!key || /^YOUR_/.test(key)) dbProblem = "config.js is missing the Supabase publishable key";
+    else if (isSecretKey(key)) dbProblem = "config.js holds a SECRET key; remove it, rotate it in Supabase and use the publishable key";
+    if (!dbProblem) {
+      try { db = window.supabase.createClient(url.replace(/\/+$/, ""), key, { auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false } }); }
+      catch (e) { dbProblem = "the Supabase client failed to start (" + (e && e.message) + ")"; }
+    }
+    if (dbProblem) console.error("[birthday] Shared board and leaderboard are off: " + dbProblem + ". See the Supabase setup section in README.md.");
+  })();
+  /* run a query; resolves to { data, error } and never rejects. Gives up after 15s so buttons don't spin forever. */
+  function run(q) {
+    var ac = window.AbortController && q.abortSignal ? new AbortController() : null, timer = 0;
+    if (ac) { q = q.abortSignal(ac.signal); timer = setTimeout(function () { ac.abort(); }, 15000); }
+    return Promise.resolve(q).then(function (r) { return r || { data: null, error: { message: "empty response" } }; }, function (e) { return { data: null, error: e }; })
+      .then(function (r) { clearTimeout(timer); return r; });
+  }
+  /* short visitor-facing reason; full details go to the console */
+  function why(err) {
+    var code = err && err.code, m = String((err && (err.message || err.name)) || err || "");
+    console.error("[birthday] Supabase request failed:", err);
+    if (code === "23514" || code === "23502" || code === "22001" || code === "22023") return "the database didn't accept that";
+    if (/invalid api key|jwt|apikey/i.test(m) || code === "401") return "the site's Supabase key looks wrong";
+    if (code === "42501" || /permission denied|row-level security/i.test(m)) return "the database refused it (permissions)";
+    if (code === "42P01" || code === "PGRST205" || code === "PGRST202" || code === "55000" || /does not exist|schema cache|could not find the function/i.test(m)) return "the database isn't fully set up yet";
+    if (/abort/i.test(m)) return "the connection timed out";
+    if (/fetch|network|load failed/i.test(m)) return "couldn't reach the server, check your connection";
+    return "something went wrong";
+  }
+  /* rows by id, so the insert response and the matching Realtime event can't show the same row twice */
+  function store(load, render) {
+    var s = { rows: {}, fresh: {}, state: "loading", problem: "", gen: 0 };
+    s.add = function (r) { if (r && r.id != null) { s.rows[r.id] = r; s.fresh[r.id] = r; } };
+    s.list = function () { return Object.keys(s.rows).map(function (k) { return s.rows[k]; }); };
+    s.refresh = function () {
+      if (!db) { s.state = "off"; s.problem = dbProblem; render(); return; }
+      var gen = ++s.gen; s.fresh = {};
+      if (s.state !== "ready") { s.state = "loading"; render(); }
+      run(load()).then(function (r) {
+        if (gen !== s.gen) return;
+        if (r.error) { if (s.state !== "ready") { s.state = "error"; s.problem = why(r.error); render(); } else why(r.error); return; }
+        var next = {}; (r.data || []).forEach(function (x) { next[x.id] = x; });
+        Object.keys(s.fresh).forEach(function (k) { next[k] = s.fresh[k]; }); /* rows that arrived while loading */
+        s.rows = next; s.state = "ready"; render();
+      });
+    };
+    return s;
+  }
+  var notes = store(function () {
+    return db.from("birthday_messages").select("id, name, message, created_at")
+      .order("created_at", { ascending: false }).order("id", { ascending: false }).limit(200);
+  }, function () { renderBoard(); });
+  var scores = store(function () {
+    return db.from("quiz_scores").select("id, name, score, total_questions, created_at")
+      .order("score", { ascending: false }).order("created_at", { ascending: true }).order("id", { ascending: true }).limit(25);
+  }, function () { renderLead(); });
+  /* live updates: new rows from other visitors appear without a refresh */
+  var live = null, lastSync = Date.now();
+  function listen() {
+    if (!db || live) return;
+    live = db.channel("birthday-live")
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "birthday_messages" }, function (p) { notes.add(p.new); renderBoard(); })
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "quiz_scores" }, function (p) { scores.add(p.new); renderLead(); })
+      .subscribe(function (st) {
+        if (st === "CHANNEL_ERROR" || st === "TIMED_OUT") console.warn("[birthday] Live updates unavailable (" + st + "). The board still refreshes after each post and when the tab is reopened.");
+      });
+  }
+  function syncAll() { lastSync = Date.now(); notes.refresh(); scores.refresh(); }
+  window.addEventListener("pagehide", function () { if (db && live) { db.removeChannel(live); live = null; } });
+  window.addEventListener("pageshow", function (e) { if (e.persisted) { listen(); syncAll(); } });
+  document.addEventListener("visibilitychange", function () { if (document.visibilityState === "visible" && Date.now() - lastSync > 30000) syncAll(); });
+  function retryButton(fn) { var b = mk("button", "btn alt", "Try again"); b.type = "button"; b.addEventListener("click", fn); return b; }
+
+  /* notes saved by the old device-only page: offer to add them to the shared board (not uploaded automatically).
+     Old device-only quiz scores are not offered: scores are only ever created by the database grading real answers. */
+  function offerLegacyNotes() {
+    var rows = [];
+    localNotes.forEach(function (x) {
+      var name = x ? String(x.name || "").trim().slice(0, 60) : "", m = x ? String(x.msg || "").trim().slice(0, 1000) : "";
+      if (name && m) rows.push({ name: name, message: m });
+    });
+    if (!db || !rows.length) return;
+    var what = rows.length + " note" + (rows.length === 1 ? "" : "s");
+    function show(text, bad) {
+      say(status, text, bad);
+      var b = mk("button", "btn alt", "Add to the shared board"); b.type = "button";
+      b.addEventListener("click", function () {
+        if (b.disabled) return;
+        busy(b, true, "Adding...");
+        run(db.from("birthday_messages").insert(rows).select("id, name, message, created_at")).then(function (r) {
+          if (r.error) { show("Couldn't add the " + what + ": " + why(r.error) + ". ", true); return; }
+          try { localStorage.removeItem(LS_NOTES); } catch (e) {}
+          localNotes = [];
+          (r.data || []).forEach(function (x) { myNotes.push(x.id); notes.add(x); });
+          saveLocal(LS_MY_NOTES, myNotes); renderBoard();
+          say(status, "Done! " + (rows.length === 1 ? "It is" : "They are") + " now shared with everyone.");
+        });
+      });
+      status.appendChild(b);
+    }
+    show(what + " from before the shared board" + (rows.length === 1 ? " is" : " are") + " saved only on this device. ");
+  }
 
   /* ---------- quiz ---------- */
   function renderStart() {
     quiz.textContent = "";
     quiz.style.display = "grid"; quiz.style.gap = "12px"; quiz.style.maxWidth = "520px";
     var lab = mk("label", "", "Your name (it goes on the leaderboard)"); lab.htmlFor = "q-name";
-    var inp = mk("input"); inp.id = "q-name"; inp.maxLength = 40; inp.placeholder = "Your name"; inp.value = player; inp.autocomplete = "off";
+    var inp = mk("input"); inp.id = "q-name"; inp.maxLength = NAME_MAX; inp.placeholder = "Your name"; inp.value = player; inp.autocomplete = "off";
     var go = mk("button", "btn form-btn", "Start quiz"); go.type = "button";
     go.addEventListener("click", function () {
-      var v = inp.value.trim();
-      if (!v) { inp.placeholder = "Type your name first"; inp.focus(); return; }
-      player = v; qi = 0; score = 0;
+      var v = clean(inp.value, NAME_MAX, "your name");
+      if (!v) { inp.value = ""; inp.placeholder = "Type your name first"; inp.focus(); return; }
+      player = v; qi = 0; score = 0; picks = []; attempt++;
       try { ensureCtx(); if (ctx.resume) ctx.resume(); } catch (e) {}
       t0 = performance.now(); renderQ();
     });
@@ -481,7 +626,7 @@ var DATA_SCORES = [
       var b = mk("button", "opt", text); b.type = "button";
       b.addEventListener("click", function () {
         opts.querySelectorAll(".opt").forEach(function (x, j) { x.disabled = true; if (j === item.a) x.classList.add("right"); else if (j === i) x.classList.add("wrong"); });
-        sfx(i === item.a);
+        picks[qi] = i; sfx(i === item.a);
         if (i === item.a) score++;
         r.textContent = "Score " + score;
         next.hidden = false;
@@ -494,33 +639,69 @@ var DATA_SCORES = [
 
   function finish() {
     var ms = Math.round(performance.now() - t0), n = QUESTIONS.length, full = score === n, secs = (ms / 1000).toFixed(1);
-    localScores.push({ name: player, score: score, ms: ms }); saveLocal(LS_SCORES, localScores); renderLead();
     quiz.textContent = "";
     var res = mk("p", "result", score + " / " + n + " in " + secs + "s");
     var tag = mk("p", "tagline", full ? "Hehehe u are really alpha sigma" : "Not full score? Hehehe you are gonna get blocked");
-    var st = mk("p", "status", "Your score is on this device. Send it to Aakshi so she can add you to the leaderboard for everyone.");
+    var st = mk("p", "status"); st.setAttribute("role", "status");
     var row = mk("div", "actions"); row.style.justifyContent = "flex-start";
     var again = mk("button", "btn form-btn", "Try again"); again.type = "button";
     again.addEventListener("click", renderStart);
     row.append(waButton("Quiz score: " + player + " got " + score + "/" + n + " in " + secs + "s", "Send score on WhatsApp"), again);
     quiz.append(res, tag, st, row);
+    saveScore({ attempt: attempt, name: player, answers: picks.slice(), score: score }, st);
     if (full) { setTimeout(sfxWin, 250); }
+  }
+
+  /* every finished attempt is its own row (retakes included); an attempt is only ever sent once */
+  var savingAttempts = {};
+  function saveScore(a, st) {
+    if (savingAttempts[a.attempt]) return;
+    if (!db) { say(st, "Your score couldn't be saved: the shared leaderboard isn't connected yet (" + dbProblem + ").", true); return; }
+    var valid = a.name && a.answers.length === QUESTIONS.length && a.answers.every(function (x) { return x % 1 === 0 && x >= 0 && x <= 3; });
+    if (!valid) { say(st, "Your score couldn't be saved (the quiz didn't finish properly).", true); return; }
+    savingAttempts[a.attempt] = true;
+    say(st, "Saving your score to the leaderboard...");
+    /* only the picked options are sent; the database grades them and stores the score it works out */
+    run(db.rpc("submit_quiz_attempt", { p_name: a.name, p_answers: a.answers })).then(function (r) {
+      if (r.error || !r.data) {
+        delete savingAttempts[a.attempt];
+        say(st, "Your score didn't save: " + why(r.error || "no row returned") + ". ", true);
+        var b = mk("button", "btn alt", "Try saving again"); b.type = "button";
+        b.addEventListener("click", function () { b.disabled = true; saveScore(a, st); });
+        st.appendChild(b);
+        return;
+      }
+      myScores.push(r.data.id); saveLocal(LS_MY_SCORES, myScores);
+      scores.add(r.data); renderLead();
+      say(st, r.data.score === a.score ? "Saved! Your score is on the leaderboard for everyone."
+        : "Saved! The leaderboard checked your answers and has you at " + r.data.score + "/" + r.data.total_questions + ".");
+    });
   }
 
   function renderLead() {
     var ol = $("lead"); ol.textContent = "";
-    var rows = [];
-    DATA_SCORES.forEach(function (x) { if (x && typeof x.score === "number" && typeof x.ms === "number") rows.push({ name: String(x.name || "Someone").slice(0, 40), score: x.score, ms: x.ms, mine: false }); });
-    localScores.forEach(function (x) { if (x && typeof x.score === "number" && typeof x.ms === "number") rows.push({ name: String(x.name || "You").slice(0, 40), score: x.score, ms: x.ms, mine: true }); });
-    rows.sort(function (a, b) { return (b.score - a.score) || (a.ms - b.ms); });
-    if (!rows.length) { ol.appendChild(mk("li", "lead-empty", "No scores yet. Finish the quiz to claim the first spot.")); return; }
+    var rows = scores.list().map(function (x) {
+      return { id: x.id, name: String(x.name), score: x.score, t: ts(x.created_at), at: x.created_at, mine: myScores.indexOf(x.id) !== -1 };
+    });
+    /* hand-added scores count as earliest among equal scores */
+    DATA_SCORES.forEach(function (x) { if (x && typeof x.score === "number") rows.push({ id: 0, name: String(x.name || "Someone").slice(0, 60), score: x.score, t: -Infinity, at: null, mine: false }); });
+    rows.sort(function (a, b) { return (b.score - a.score) || (a.t - b.t) || (a.id - b.id); });
+    var notice = scores.state === "loading" ? "Loading scores..."
+      : scores.state === "error" ? "Couldn't load the leaderboard: " + scores.problem + ". "
+      : scores.state === "off" ? "The shared leaderboard isn't connected yet (" + scores.problem + ")."
+      : rows.length ? "" : "No scores yet. Finish the quiz to claim the first spot.";
     rows.slice(0, 25).forEach(function (r, i) {
       var li = mk("li");
       li.appendChild(mk("span", "rank", String(i + 1)));
       li.appendChild(mk("span", "lname", r.name + (r.mine ? " (you)" : "")));
-      li.appendChild(mk("span", "lstat", r.score + "/" + QUESTIONS.length + "  " + (r.ms / 1000).toFixed(1) + "s"));
+      li.appendChild(mk("span", "lstat", r.score + "/" + QUESTIONS.length + (r.at ? "  " + when(r.at) : "")));
       ol.appendChild(li);
     });
+    if (notice) {
+      var li = mk("li", "lead-empty", notice);
+      if (scores.state === "error") li.appendChild(retryButton(scores.refresh));
+      ol.appendChild(li);
+    }
   }
 
   /* ---------- sticky-note board ---------- */
@@ -529,31 +710,54 @@ var DATA_SCORES = [
 
   function renderBoard() {
     wall.textContent = "";
-    var items = [];
-    DATA_NOTES.forEach(function (x) { if (x && x.msg) items.push({ name: String(x.name || "Someone").slice(0, 40), msg: String(x.msg).slice(0, 280), mine: false }); });
-    localNotes.forEach(function (x) { if (x && x.msg) items.push({ name: String(x.name || "You").slice(0, 40), msg: String(x.msg).slice(0, 280), mine: true }); });
-    if (!items.length) { wall.appendChild(mk("div", "empty-note", "The board is empty. Be the first to stick a note.")); return; }
+    /* newest first */
+    var items = notes.list().sort(function (a, b) { return (ts(b.created_at) - ts(a.created_at)) || (b.id - a.id); }).map(function (x) {
+      return { name: String(x.name), msg: String(x.message), at: x.created_at, mine: myNotes.indexOf(x.id) !== -1 };
+    });
+    DATA_NOTES.forEach(function (x) { if (x && x.msg) items.push({ name: String(x.name || "Someone").slice(0, 60), msg: String(x.msg).slice(0, 1000), at: null, mine: false }); });
+    var notice = notes.state === "loading" ? "Loading the board..."
+      : notes.state === "error" ? "Couldn't load the board: " + notes.problem + "."
+      : notes.state === "off" ? "The shared board isn't connected yet (" + notes.problem + ")."
+      : items.length ? "" : "The board is empty. Be the first to stick a note.";
+    if (notice) {
+      var empty = mk("div", "empty-note", notice);
+      if (notes.state === "error") { empty.appendChild(document.createElement("br")); empty.appendChild(retryButton(notes.refresh)); }
+      wall.appendChild(empty);
+    }
     items.forEach(function (it) {
       var h = hash(it.name + it.msg);
       var note = mk("div", "note");
       note.style.setProperty("--nbg", "var(--n" + (h % 5) + ")");
       note.style.setProperty("--rot", (((h >> 3) % 9) - 4) + "deg");
       var who = mk("div", "who"); who.appendChild(mk("span", "", "- " + it.name + (it.mine ? " (you)" : "")));
+      if (it.at) { var tm = mk("time", "", when(it.at)); tm.dateTime = it.at; who.appendChild(tm); }
       note.append(mk("p", "", it.msg), who); wall.appendChild(note);
     });
   }
 
+  var sending = false, sendBtn = $("w-send");
   $("wish-form").addEventListener("submit", function (ev) {
     ev.preventDefault();
-    var name = $("w-name").value.trim().slice(0, 40), msg = msgEl.value.trim().slice(0, 280);
-    if (!name || !msg) return;
-    localNotes.push({ name: name, msg: msg }); saveLocal(LS_NOTES, localNotes); renderBoard();
-    $("wish-form").reset(); $("w-count").textContent = "0";
-    status.textContent = "Your note is on your screen. Send it to Aakshi on WhatsApp so she can pin it for everyone. ";
-    status.appendChild(waButton("Happy birthday Aakshi! " + msg + " - " + name, "Send on WhatsApp"));
+    if (sending) return;
+    var name = clean($("w-name").value, NAME_MAX, "your name");
+    if (!name) { say(status, clean.err, true); $("w-name").focus(); return; }
+    var msg = clean(msgEl.value, MSG_MAX, "a message");
+    if (!msg) { say(status, clean.err, true); msgEl.focus(); return; }
+    if (!db) { say(status, "Your note can't go up yet: the shared board isn't connected (" + dbProblem + ").", true); return; }
+    sending = true; busy(sendBtn, true, "Sticking it up...");
+    say(status, "Sticking your note on the board...");
+    run(db.from("birthday_messages").insert({ name: name, message: msg }).select("id, name, message, created_at").single()).then(function (r) {
+      sending = false; busy(sendBtn, false);
+      if (r.error || !r.data) { say(status, "Your note didn't go up: " + why(r.error || "no row returned") + ". Your text is still in the form, so you can try again.", true); return; }
+      myNotes.push(r.data.id); saveLocal(LS_MY_NOTES, myNotes);
+      notes.add(r.data); renderBoard();
+      $("wish-form").reset(); $("w-count").textContent = "0";
+      say(status, "Your note is up on the board for everyone. ");
+      status.appendChild(waButton("Happy birthday Aakshi! " + msg + " - " + name, "Send on WhatsApp"));
+    });
   });
 
-  renderStart(); renderLead(); renderBoard();
+  renderStart(); syncAll(); listen(); offerLegacyNotes();
 })();
 </script>
 </body>
