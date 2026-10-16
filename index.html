@@ -285,7 +285,6 @@ img { max-width: 100%; }
     <h2>People will get their name on my will</h2>
     <p class="sub">Ranked by correct answers, then whoever finished first. Every finished quiz shows up here.</p>
     <ol class="lead" id="lead"><li class="lead-empty">No scores yet. Finish the quiz to claim the first spot.</li></ol>
-    <p class="status" id="lead-status" role="status" hidden></p>
   </section>
   </div>
   </div>
@@ -445,13 +444,13 @@ var DATA_SCORES = [
     { q: "Which is Aakshi's favourite gun, the OG in COD?", o: ["Mac-10", "QQ9", "VMP", "FSS Hurricane"], a: 1 },
     { q: "Which song is on loop for Aakshi?", o: ["Vienna", "Jaata ka Chora", "Ishq Sufiyana", "Brutal"], a: 0 }
   ];
-  var qi = 0, score = 0, quiz = $("quiz"), player = "", t0 = 0, attempt = 0;
-  var LS_NOTES = "aakshi_notes", LS_SCORES = "aakshi_scores", LS_MY_NOTES = "aakshi_my_note_ids", LS_MY_SCORES = "aakshi_my_score_ids";
+  var qi = 0, score = 0, quiz = $("quiz"), player = "", t0 = 0, attempt = 0, picks = [];
+  var LS_NOTES = "aakshi_notes", LS_MY_NOTES = "aakshi_my_note_ids", LS_MY_SCORES = "aakshi_my_score_ids";
   var NAME_MAX = 40, MSG_MAX = 280; /* form limits; the database itself allows up to 60 / 1000 */
   function loadLocal(k) { try { var v = JSON.parse(localStorage.getItem(k) || "[]"); return Array.isArray(v) ? v : []; } catch (e) { return []; } }
   function saveLocal(k, arr) { try { localStorage.setItem(k, JSON.stringify(arr.slice(-50))); } catch (e) {} }
-  /* notes/scores from the old device-only version of this page, offered for upload below */
-  var localNotes = loadLocal(LS_NOTES), localScores = loadLocal(LS_SCORES);
+  /* notes from the old device-only version of this page, offered for upload below */
+  var localNotes = loadLocal(LS_NOTES);
   /* ids of rows this device added, so they keep their "(you)" tag */
   var myNotes = loadLocal(LS_MY_NOTES), myScores = loadLocal(LS_MY_SCORES);
   function mk(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text) e.textContent = text; return e; }
@@ -514,10 +513,10 @@ var DATA_SCORES = [
   function why(err) {
     var code = err && err.code, m = String((err && (err.message || err.name)) || err || "");
     console.error("[birthday] Supabase request failed:", err);
-    if (code === "23514" || code === "23502" || code === "22001") return "the database didn't accept that text";
+    if (code === "23514" || code === "23502" || code === "22001" || code === "22023") return "the database didn't accept that";
     if (/invalid api key|jwt|apikey/i.test(m) || code === "401") return "the site's Supabase key looks wrong";
     if (code === "42501" || /permission denied|row-level security/i.test(m)) return "the database refused it (permissions)";
-    if (code === "42P01" || code === "PGRST205" || /does not exist|schema cache/i.test(m)) return "the database tables aren't set up yet";
+    if (code === "42P01" || code === "PGRST205" || code === "PGRST202" || code === "55000" || /does not exist|schema cache|could not find the function/i.test(m)) return "the database isn't fully set up yet";
     if (/abort/i.test(m)) return "the connection timed out";
     if (/fetch|network|load failed/i.test(m)) return "couldn't reach the server, check your connection";
     return "something went wrong";
@@ -566,38 +565,34 @@ var DATA_SCORES = [
   document.addEventListener("visibilitychange", function () { if (document.visibilityState === "visible" && Date.now() - lastSync > 30000) syncAll(); });
   function retryButton(fn) { var b = mk("button", "btn alt", "Try again"); b.type = "button"; b.addEventListener("click", fn); return b; }
 
-  /* entries saved by the old device-only page: offer to add them to the shared tables (they are not uploaded automatically) */
-  function offerLegacy(isNotes) {
-    var el = isNotes ? status : $("lead-status"), rows = [];
-    (isNotes ? localNotes : localScores).forEach(function (x) {
-      var name = x ? String(x.name || "").trim().slice(0, 60) : "";
-      if (!name) return;
-      if (isNotes) { var m = String(x.msg || "").trim().slice(0, 1000); if (m) rows.push({ name: name, message: m }); }
-      else if (typeof x.score === "number" && x.score % 1 === 0 && x.score >= 0 && x.score <= 4) rows.push({ name: name, score: x.score, total_questions: 4 });
+  /* notes saved by the old device-only page: offer to add them to the shared board (not uploaded automatically).
+     Old device-only quiz scores are not offered: scores are only ever created by the database grading real answers. */
+  function offerLegacyNotes() {
+    var rows = [];
+    localNotes.forEach(function (x) {
+      var name = x ? String(x.name || "").trim().slice(0, 60) : "", m = x ? String(x.msg || "").trim().slice(0, 1000) : "";
+      if (name && m) rows.push({ name: name, message: m });
     });
     if (!db || !rows.length) return;
-    var what = rows.length + (isNotes ? " note" : " quiz score") + (rows.length === 1 ? "" : "s");
+    var what = rows.length + " note" + (rows.length === 1 ? "" : "s");
     function show(text, bad) {
-      say(el, text, bad);
-      var b = mk("button", "btn alt", isNotes ? "Add to the shared board" : "Add to the shared leaderboard"); b.type = "button";
+      say(status, text, bad);
+      var b = mk("button", "btn alt", "Add to the shared board"); b.type = "button";
       b.addEventListener("click", function () {
         if (b.disabled) return;
         busy(b, true, "Adding...");
-        run(db.from(isNotes ? "birthday_messages" : "quiz_scores").insert(rows)
-          .select(isNotes ? "id, name, message, created_at" : "id, name, score, total_questions, created_at")).then(function (r) {
+        run(db.from("birthday_messages").insert(rows).select("id, name, message, created_at")).then(function (r) {
           if (r.error) { show("Couldn't add the " + what + ": " + why(r.error) + ". ", true); return; }
-          try { localStorage.removeItem(isNotes ? LS_NOTES : LS_SCORES); } catch (e) {}
-          if (isNotes) localNotes = []; else localScores = [];
-          var mine = isNotes ? myNotes : myScores, target = isNotes ? notes : scores;
-          (r.data || []).forEach(function (x) { mine.push(x.id); target.add(x); });
-          saveLocal(isNotes ? LS_MY_NOTES : LS_MY_SCORES, mine);
-          if (isNotes) renderBoard(); else renderLead();
-          say(el, "Done! " + (rows.length === 1 ? "It is" : "They are") + " now shared with everyone.");
+          try { localStorage.removeItem(LS_NOTES); } catch (e) {}
+          localNotes = [];
+          (r.data || []).forEach(function (x) { myNotes.push(x.id); notes.add(x); });
+          saveLocal(LS_MY_NOTES, myNotes); renderBoard();
+          say(status, "Done! " + (rows.length === 1 ? "It is" : "They are") + " now shared with everyone.");
         });
       });
-      el.appendChild(b);
+      status.appendChild(b);
     }
-    show(what + " from before the shared " + (isNotes ? "board" : "leaderboard") + (rows.length === 1 ? " is" : " are") + " saved only on this device. ");
+    show(what + " from before the shared board" + (rows.length === 1 ? " is" : " are") + " saved only on this device. ");
   }
 
   /* ---------- quiz ---------- */
@@ -610,7 +605,7 @@ var DATA_SCORES = [
     go.addEventListener("click", function () {
       var v = clean(inp.value, NAME_MAX, "your name");
       if (!v) { inp.value = ""; inp.placeholder = "Type your name first"; inp.focus(); return; }
-      player = v; qi = 0; score = 0; attempt++;
+      player = v; qi = 0; score = 0; picks = []; attempt++;
       try { ensureCtx(); if (ctx.resume) ctx.resume(); } catch (e) {}
       t0 = performance.now(); renderQ();
     });
@@ -631,7 +626,7 @@ var DATA_SCORES = [
       var b = mk("button", "opt", text); b.type = "button";
       b.addEventListener("click", function () {
         opts.querySelectorAll(".opt").forEach(function (x, j) { x.disabled = true; if (j === item.a) x.classList.add("right"); else if (j === i) x.classList.add("wrong"); });
-        sfx(i === item.a);
+        picks[qi] = i; sfx(i === item.a);
         if (i === item.a) score++;
         r.textContent = "Score " + score;
         next.hidden = false;
@@ -653,7 +648,7 @@ var DATA_SCORES = [
     again.addEventListener("click", renderStart);
     row.append(waButton("Quiz score: " + player + " got " + score + "/" + n + " in " + secs + "s", "Send score on WhatsApp"), again);
     quiz.append(res, tag, st, row);
-    saveScore({ attempt: attempt, name: player, score: score, total: n }, st);
+    saveScore({ attempt: attempt, name: player, answers: picks.slice(), score: score }, st);
     if (full) { setTimeout(sfxWin, 250); }
   }
 
@@ -662,11 +657,12 @@ var DATA_SCORES = [
   function saveScore(a, st) {
     if (savingAttempts[a.attempt]) return;
     if (!db) { say(st, "Your score couldn't be saved: the shared leaderboard isn't connected yet (" + dbProblem + ").", true); return; }
-    if (!(a.score % 1 === 0 && a.score >= 0 && a.score <= a.total && a.total === 4) || !a.name) { say(st, "Your score couldn't be saved (it looks invalid).", true); return; }
+    var valid = a.name && a.answers.length === QUESTIONS.length && a.answers.every(function (x) { return x % 1 === 0 && x >= 0 && x <= 3; });
+    if (!valid) { say(st, "Your score couldn't be saved (the quiz didn't finish properly).", true); return; }
     savingAttempts[a.attempt] = true;
     say(st, "Saving your score to the leaderboard...");
-    run(db.from("quiz_scores").insert({ name: a.name, score: a.score, total_questions: a.total })
-      .select("id, name, score, total_questions, created_at").single()).then(function (r) {
+    /* only the picked options are sent; the database grades them and stores the score it works out */
+    run(db.rpc("submit_quiz_attempt", { p_name: a.name, p_answers: a.answers })).then(function (r) {
       if (r.error || !r.data) {
         delete savingAttempts[a.attempt];
         say(st, "Your score didn't save: " + why(r.error || "no row returned") + ". ", true);
@@ -677,7 +673,8 @@ var DATA_SCORES = [
       }
       myScores.push(r.data.id); saveLocal(LS_MY_SCORES, myScores);
       scores.add(r.data); renderLead();
-      say(st, "Saved! Your score is on the leaderboard for everyone.");
+      say(st, r.data.score === a.score ? "Saved! Your score is on the leaderboard for everyone."
+        : "Saved! The leaderboard checked your answers and has you at " + r.data.score + "/" + r.data.total_questions + ".");
     });
   }
 
@@ -760,7 +757,7 @@ var DATA_SCORES = [
     });
   });
 
-  renderStart(); syncAll(); listen(); offerLegacy(true); offerLegacy(false);
+  renderStart(); syncAll(); listen(); offerLegacyNotes();
 })();
 </script>
 </body>
