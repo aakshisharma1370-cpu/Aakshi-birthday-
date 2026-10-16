@@ -10,6 +10,6 @@
  * password here. Anything in this file is visible to every visitor.
  */
 window.SUPABASE_CONFIG = {
-  url: "YOUR_SUPABASE_PROJECT_URL",
-  publishableKey: "YOUR_SUPABASE_PUBLISHABLE_KEY"
+  url: "https://opxktqhuywumwximmohe.supabase.co",
+  publishableKey: "sb_publishable_kBjvCErC4AWE1dGBYOv6jg_gG0LPpZT"
 };
