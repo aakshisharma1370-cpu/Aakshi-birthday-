@@ -85,6 +85,26 @@ Open the live site in two different browsers (e.g. Chrome on your laptop and you
    ```
    (Run each block on its own and then `reset role;`, or just open a new query tab.)
 
+### Test locally before deploying
+
+1. Fill in `config.js` (step 3). Only the project URL and the publishable key go there.
+2. Check the live database from a terminal in the repo folder (Node 18+):
+   ```
+   node scripts/check-supabase.mjs
+   ```
+   It reads both tables and confirms that direct score inserts, updates and deletes are refused, the answer key is hidden, and the grader rejects bad input. All lines should say PASS. To also test writes (one note and two quiz attempts named "Setup check", which you can delete afterwards):
+   ```
+   node scripts/check-supabase.mjs --write
+   ```
+3. Serve the folder over http (opening the file directly works for most things, but a server matches GitHub Pages):
+   ```
+   python -m http.server 8000
+   ```
+   Then open <http://localhost:8000> in two different browsers.
+4. Open the browser console (F12). There should be no red `[birthday]` errors.
+5. Run through the checklist in step 4 above using the two browsers.
+6. Stop the server with Ctrl+C.
+
 ### Moderating
 
 Visitors can't edit or delete anything, but you can. Open **Table Editor** → pick the table → select rows → delete. Pages that are already open drop the row on their next refresh.
